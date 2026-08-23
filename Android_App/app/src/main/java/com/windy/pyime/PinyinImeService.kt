@@ -84,6 +84,7 @@ class PinyinImeService : InputMethodService() {
     private var keyboardView: View? = null         // 键盘整体
     private var panelView: View? = null            // 工具面板(剪贴板/常用语)
     private var panelContent: LinearLayout? = null // 工具面板内容区(Tab 切换时重建)
+    private var panelHeader: LinearLayout? = null  // 工具面板内容区上方的固定栏(如常用语的文件夹行),不随内容滚动
     private var currentFolder: DataStore.Folder? = null  // 常用语当前进入的文件夹(null=最近)
 
     // 跳转到编辑页(PhraseEditActivity)/同步页(SyncActivity)后,返回时自动重开工具面板
@@ -1021,21 +1022,31 @@ class PinyinImeService : InputMethodService() {
             )
         }
 
-        // 顶部 Tab 行:剪贴板 / 常用语 / 返回键盘
+        // 顶部 Tab 行:剪贴板 / 常用语 / 返回键盘(比普通键位行矮,给内容区多留空间)
         val tabRow = newRow()
-        clipTabKey = makeKey("剪贴板", 2f) { toolTab = TAB_CLIP; currentFolder = null; renderPanel() }
-        phraseTabKey = makeKey("常用语", 2f) { toolTab = TAB_PHRASE; currentFolder = null; renderPanel() }
+        clipTabKey = makeKey("剪贴板", 2f, heightDp = TOOL_TAB_ROW_HEIGHT, textSizeSp = 15f) { toolTab = TAB_CLIP; currentFolder = null; renderPanel() }
+        phraseTabKey = makeKey("常用语", 2f, heightDp = TOOL_TAB_ROW_HEIGHT, textSizeSp = 15f) { toolTab = TAB_PHRASE; currentFolder = null; renderPanel() }
         tabRow.addView(clipTabKey)
         tabRow.addView(phraseTabKey)
-        tabRow.addView(makeKey("☁", 1.4f) {
+        tabRow.addView(makeKey("☁", 1.4f, heightDp = TOOL_TAB_ROW_HEIGHT, textSizeSp = 15f) {
             // 从工具面板进同步页:记下当前 Tab/文件夹,返回外部输入框时自动重开本面板
             pendingReopenPanel = true
             pendingReopenTab = toolTab
             pendingReopenFolderUuid = currentFolder?.uuid
             openSync()
         })
-        tabRow.addView(makeKey("⌨", 1.4f) { closeToolPanel() })
+        tabRow.addView(makeKey("⌨", 1.4f, heightDp = TOOL_TAB_ROW_HEIGHT, textSizeSp = 15f) { closeToolPanel() })
         panel.addView(tabRow)
+
+        // 固定栏:常用语的文件夹行放这里,向下滚动内容时始终悬停显示,不随内容滚走
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        panelHeader = header
+        panel.addView(header)
 
         // 内容区:固定高度的可滚动列表(高度与键盘大致相当,避免面板忽高忽低)
         val content = LinearLayout(this).apply {
@@ -1073,6 +1084,7 @@ class PinyinImeService : InputMethodService() {
         updateTabHighlight()
         val content = panelContent ?: return
         content.removeAllViews()
+        panelHeader?.removeAllViews()
         when (toolTab) {
             TAB_CLIP -> renderClipboard(content)
             else -> renderPhrase(content)
@@ -1133,7 +1145,8 @@ class PinyinImeService : InputMethodService() {
         for (f in ds.folders()) foldersContainer.addView(folderChip(f, foldersContainer))
         bar.addView(foldersContainer)
         bar.addView(chip("+ 文件夹", selected = false) { promptNewFolder() })
-        content.addView(barScroll)
+        // 放进固定栏(panelHeader),而不是可滚动的 content:下滑内容列表时文件夹行始终悬停可见
+        panelHeader?.addView(barScroll)
 
         val folder = currentFolder
         if (folder == null) {
@@ -2403,6 +2416,7 @@ class PinyinImeService : InputMethodService() {
         const val DEFAULT_ROW_HEIGHT = 46
         const val MIN_ROW_HEIGHT = 36
         const val MAX_ROW_HEIGHT = 76
+        const val TOOL_TAB_ROW_HEIGHT = 34             // 工具面板顶部「剪贴板/常用语/同步」Tab 行高(比普通键位行矮)
 
         const val SHIFT_OFF = 0    // 小写
         const val SHIFT_ONCE = 1   // 单次大写(打一个字母后复位)
