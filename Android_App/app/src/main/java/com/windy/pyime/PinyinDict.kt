@@ -19,6 +19,7 @@ class PinyinDict(raw: String) {
     private val table = HashMap<String, MutableList<WordWeight>>()   // "ni hao" -> 按权重降序
     private val syllables = HashSet<String>()                        // 所有合法音节
     private val fuzzy = HashMap<String, List<String>>()              // 音节 -> 等价音节(不含自身)
+    private val letterFuzzy = HashMap<Char, List<Char>>()            // 简拼声母字母 -> 模糊等价字母(不含自身)
     private val abbr = HashMap<String, MutableList<WordWeight>>()    // 声母串 -> 候选(共享 table 的实例)
     // 末字简拼索引:(前缀全拼, 末尾声母串) -> 候选(共享 table 的实例)。
     // 如 设计 she ji -> ("she","j");计算机 ji suan ji -> ("ji suan","j")、("ji","sj")
@@ -76,6 +77,24 @@ class PinyinDict(raw: String) {
         }
         syllables.addAll(virtual)
         if (virtual.isNotEmpty()) maxsyl = maxOf(maxsyl, virtual.maxOf { it.length })
+
+        // 简拼字母模糊闭包:只取 FUZZY_PAIRS 里两端都是单字母声母的对(如 l/r、n/l,
+        // z/zh、s/sh 这类因为简拼本就取首字符,两端已经是同一个字母,无需再处理),
+        // 构成字母级等价闭包,供简拼(snt/srt/slt 应等价命中"水龙头")按字母展开查找用。
+        val letterPairs = FUZZY_PAIRS.filter { (a, b) -> a.length == 1 && b.length == 1 }
+        val letterAlphabet = HashSet<Char>()
+        for ((a, b) in letterPairs) { letterAlphabet.add(a[0]); letterAlphabet.add(b[0]) }
+        for (c in letterAlphabet) {
+            val group = HashSet<Char>().apply { add(c) }
+            val todo = ArrayDeque<Char>().apply { add(c) }
+            while (todo.isNotEmpty()) {
+                val cur = todo.removeLast()
+                for ((a, b) in letterPairs) for ((x, y) in listOf(a[0] to b[0], b[0] to a[0])) {
+                    if (cur == x && y !in group) { group.add(y); todo.add(y) }
+                }
+            }
+            if (group.size > 1) letterFuzzy[c] = (group - c).sorted()
+        }
 
         // ---- 简拼索引:每音节取首字母,按权重降序、截断 ----
         if (ENABLE_SHOUPIN) {
@@ -188,6 +207,18 @@ class PinyinDict(raw: String) {
         return combos
     }
 
+    /** 简拼字母串 letters 的所有模糊音字母组合键,第一个固定是原字母串。 */
+    fun abbrKeys(letters: String): List<String> {
+        var combos = listOf("")
+        for (ch in letters) {
+            val vs = listOf(ch) + (letterFuzzy[ch] ?: emptyList())
+            val next = ArrayList<String>(combos.size * vs.size)
+            for (c in combos) for (v in vs) next.add(c + v)
+            combos = if (next.size > MAX_FUZZY_KEYS) next.subList(0, MAX_FUZZY_KEYS) else next
+        }
+        return combos
+    }
+
     /**
      * 枚举字母串的所有「整串音节切分」方案,按贪心偏好排序(音节数少优先、靠前音节长优先;
      * 首个即与 segment 的贪心结果一致)。无法整串覆盖时返回空表。
@@ -288,10 +319,15 @@ class PinyinDict(raw: String) {
             if (n == segs.size) addPartAbbr(buf, segs.size, ::add)
         }
 
-        // 简拼:整串全是允许的声母字母时,按声母串补充候选(消耗整个缓冲区)
+        // 简拼:整串全是允许的声母字母时,按声母串(含字母级模糊音展开)补充候选(消耗整个缓冲区)
         val letters = buf.replace("'", "")
         if (abbr.isNotEmpty() && letters.length >= 2 && letters.all { it in ABBR_LETTERS }) {
-            abbr[letters]?.forEach { add(it.word, segs.size, it.weight) }
+            val abbrPool = ArrayList<Triple<String, Int, Int>>()
+            for ((ki, k) in abbrKeys(letters).withIndex()) {
+                abbr[k]?.forEach { abbrPool.add(Triple(it.word, it.weight, ki)) }
+            }
+            abbrPool.sortWith(compareByDescending<Triple<String, Int, Int>> { it.second }.thenBy { it.third })
+            for (t in abbrPool) add(t.first, segs.size, t.second)
         }
         // 消耗输入更多的候选排前(如 nbn:吃满 3 字母的"能不能"应在只占 1 个的"嗯"前);
         // 同消耗数按权重降序;稳定排序,权重也相同时保持插入次序(精确>模糊>简拼)
@@ -343,15 +379,18 @@ class PinyinDict(raw: String) {
                 pool = p
             }
         }
-        if (target == null) {   // 简拼选词:反查该词真正的拼音键
+        if (target == null) {   // 简拼选词:反查该词真正的拼音键(简拼按字母模糊展开)
             val letters = sylls.joinToString("")
-            val ab = abbr[letters]
-            if (ab != null && ab.any { it.word == word }) {
-                pool = ab
+            var abKey: String? = null
+            for (k in abbrKeys(letters)) {
+                val ab = abbr[k]
+                if (ab != null && ab.any { it.word == word }) { abKey = k; pool = ab; break }
+            }
+            if (abKey != null) {
                 for ((k, v) in table) {
                     val ss = k.split(" ")
-                    if (ss.size == letters.length &&
-                        ss.indices.all { ss[it][0] == letters[it] } &&
+                    if (ss.size == abKey.length &&
+                        ss.indices.all { ss[it][0] == abKey[it] } &&
                         v.any { it.word == word }
                     ) { target = k; break }
                 }

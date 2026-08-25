@@ -581,6 +581,26 @@ class Dict:
         self.syllables |= virtual
         if virtual:
             self.maxsyl = max(self.maxsyl, max(len(s) for s in virtual))
+        # 简拼字母模糊闭包:只取 FUZZY_PAIRS 里两端都是单字母声母的对(如 l/r、n/l;
+        # z/zh、s/sh 这类简拼本就取首字符,两端已是同一个字母,无需再处理),构成
+        # 字母级等价闭包,供简拼(snt/srt/slt 应等价命中"水龙头")按字母展开查找用。
+        self.letter_fuzzy = {}  # 简拼声母字母 -> 模糊等价字母列表(不含自身)
+        letter_pairs = [(a, b) for a, b in FUZZY_PAIRS if len(a) == 1 and len(b) == 1]
+        letter_alphabet = set()
+        for a, b in letter_pairs:
+            letter_alphabet.add(a)
+            letter_alphabet.add(b)
+        for c in letter_alphabet:
+            group, todo = {c}, [c]
+            while todo:
+                cur = todo.pop()
+                for a, b in letter_pairs:
+                    for x, y in ((a, b), (b, a)):
+                        if cur == x and y not in group:
+                            group.add(y)
+                            todo.append(y)
+            if len(group) > 1:
+                self.letter_fuzzy[c] = sorted(group - {c})
         # 简拼索引:声母串(每音节取首字母)-> [(词, 权重)],按词频降序、截断
         self.abbr = {}
         if ENABLE_SHOUPIN:
@@ -710,6 +730,16 @@ class Dict:
                 combos = combos[:MAX_FUZZY_KEYS]
         return combos
 
+    def abbr_keys(self, letters):
+        """简拼字母串 letters 的所有模糊音字母组合键,第一个固定是原字母串。"""
+        combos = [""]
+        for ch in letters:
+            vs = [ch] + self.letter_fuzzy.get(ch, [])
+            combos = [c + v for c in combos for v in vs]
+            if len(combos) > MAX_FUZZY_KEYS:
+                combos = combos[:MAX_FUZZY_KEYS]
+        return combos
+
     def _full_segs(self, letters, cap=24):
         """枚举字母串的所有「整串音节切分」方案,按贪心偏好排序(音节数少优先、
         靠前音节长优先;首个即与 segment 的贪心结果一致)。无法整串覆盖时返回 []。
@@ -803,11 +833,16 @@ class Dict:
             if n == len(segs):
                 self._add_part_abbr(buf, len(segs), add)
 
-        # 简拼:整串全是声母字母时,按声母串补充候选(消耗整个缓冲区)
+        # 简拼:整串全是声母字母时,按声母串(含字母级模糊音展开)补充候选(消耗整个缓冲区)
         letters = buf.replace("'", "")
         if (self.abbr and len(letters) >= 2
                 and all(c in _ABBR_LETTERS for c in letters)):
-            for w, _wt in self.abbr.get(letters, []):
+            abbr_pool = []
+            for ki, k in enumerate(self.abbr_keys(letters)):
+                for w, wt_ in self.abbr.get(k, []):
+                    abbr_pool.append((w, wt_, ki))
+            abbr_pool.sort(key=lambda x: (-x[1], x[2]))
+            for w, _wt, _ki in abbr_pool:
                 add(w, len(segs), _wt)
         # 消耗输入更多的候选排在前(如 nbn:吃满 3 个字母的"能不能"应在只占 1 个的"嗯"前);
         # 消耗数相同时按权重降序(如 az:简拼"安卓"应在末字简拼"阿紫"前);
@@ -851,15 +886,19 @@ class Dict:
                     break
             if target:
                 pool = [t for k in keys for t in self.table.get(k, ())]
-        if target is None:  # 简拼选词:反查该词真正的拼音键
+        if target is None:  # 简拼选词:反查该词真正的拼音键(简拼按字母模糊展开)
             letters = "".join(sylls)
-            ab = self.abbr.get(letters)
-            if ab and any(w == word for w, _ in ab):
-                pool = ab
+            ab_key = None
+            for k in self.abbr_keys(letters):
+                ab = self.abbr.get(k)
+                if ab and any(w == word for w, _ in ab):
+                    ab_key, pool = k, ab
+                    break
+            if ab_key is not None:
                 for k, v in self.table.items():
                     ss = k.split(" ")
-                    if (len(ss) == len(letters)
-                            and all(s[0] == c for s, c in zip(ss, letters))
+                    if (len(ss) == len(ab_key)
+                            and all(s[0] == c for s, c in zip(ss, ab_key))
                             and any(w == word for w, _ in v)):
                         target = k
                         break
