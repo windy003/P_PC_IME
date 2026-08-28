@@ -194,6 +194,20 @@ def shell_panel_rect():
     return None
 
 
+def caps_on():
+    """系统大小写锁定当前是否打开(Caps 灯亮)。"""
+    return bool(user32.GetKeyState(VK_CAPITAL) & 1)
+
+
+def send_vk(vk):
+    """注入一次虚拟键的按下+抬起(带 MAGIC_EXTRA,自己的钩子会忽略)。"""
+    arr = (INPUT * 2)()
+    for i, flags in enumerate((0, KEYEVENTF_KEYUP)):
+        arr[i].type = INPUT_KEYBOARD
+        arr[i].u.ki = KEYBDINPUT(vk, 0, flags, 0, MAGIC_EXTRA)
+    return user32.SendInput(len(arr), arr, ctypes.sizeof(INPUT))
+
+
 def send_text(text):
     """用 KEYEVENTF_UNICODE 把字符串发送到当前焦点窗口。"""
     data = text.encode("utf-16-le")
@@ -966,12 +980,13 @@ class Engine:
         self.dic = dic
         self.q = ui_q
         self.cn_mode = True
-        self.caps_mode = False  # 英文大写模式(Caps Lock 从中文切入):字母直接上屏大写
+        self.caps_mode = False  # 系统大小写锁定是否打开(仅用于托盘显示 A/英)
         self.buf = ""
         self.cands = []      # [(词, 消耗音节数)]
         self.segs = []
         self.page = 0
         self.shift_tap = False  # Shift 按下且尚无其他键 → 抬起时切换模式
+        self._caps_eaten = False  # 本次 Caps 的 keydown 是否被吞掉(keyup 要跟着吞)
         self.posgen = 0      # 定位代数:上屏/清空后 +1,UI 线程据此重新取候选框落点
         self.tray = None     # 系统托盘图标(托盘创建后回填),用于切换时刷新 中/英
 
@@ -1006,27 +1021,26 @@ class Engine:
 
     def toggle(self):
         self.cn_mode = not self.cn_mode
-        self.caps_mode = False  # 普通中英切换一律退出大写模式,避免状态串台
+        if self.cn_mode and caps_on():
+            send_vk(VK_CAPITAL)  # 切回中文时关掉大写锁定,避免状态串台
+        self.caps_mode = False
         self.clear()
         if self.tray:  # 状态显示在系统托盘图标上(中/英),不再屏幕弹窗
             self.tray.set_mode(self.cn_mode)
         print("[PyIME] %s" % ("中文模式" if self.cn_mode else "英文模式"))
 
-    def caps_toggle(self):
-        """Caps Lock:中文(拼音)→ 英文大写模式;英文 → 切回中文模式。"""
-        if self.cn_mode:
-            if self.buf:  # 组词中按 Caps:已输入的原始字母先上屏(同 Shift 单击)
-                self.commit(self.buf.replace("'", ""))
-            self.cn_mode = False
-            self.caps_mode = True
-        else:
-            self.cn_mode = True
-            self.caps_mode = False
+    def caps_to_english(self):
+        """Caps Lock 在中文下:切到英文,并真正打开系统大小写锁定(Caps 灯亮)。"""
+        if self.buf:  # 组词中按 Caps:已输入的原始字母先上屏(同 Shift 单击)
+            self.commit(self.buf.replace("'", ""))
+        self.cn_mode = False
         self.clear()
+        if not caps_on():
+            send_vk(VK_CAPITAL)
+        self.caps_mode = True
         if self.tray:
             self.tray.set_mode(self.cn_mode)
-        print("[PyIME] %s" % ("英文大写模式" if self.caps_mode
-                              else ("中文模式" if self.cn_mode else "英文模式")))
+        print("[PyIME] 英文大写模式")
 
     # ---------- 候选选择 ----------
     def choose(self, idx):
@@ -1062,21 +1076,21 @@ class Engine:
         if vk == VK_SPACE and ctrl_down():
             self.toggle()
             return True
-        if vk == VK_CAPITAL:  # 中文 ↔ 英文大写,程序自己接管,不让系统翻转 Caps 灯
-            self.caps_toggle()
-            return True
+        if vk == VK_CAPITAL:
+            if self.cn_mode:  # 中文 → 英文大写,自己接管(不让 Caps 灯在中文下乱亮)
+                self.caps_to_english()
+                self._caps_eaten = True
+                return True
+            # 英文模式下 Caps Lock 交还系统:只翻转大小写锁定,不切回中文
+            self._caps_eaten = False
+            return False
         if vk in SHIFT_KEYS:
             if not (ctrl_down() or alt_down() or win_down()):
                 self.shift_tap = True
             return False
 
         if not self.cn_mode:
-            # 英文大写模式:字母直接发送大写(Shift+字母 = 小写,模拟真实 Caps Lock)
-            if (self.caps_mode and 0x41 <= vk <= 0x5A
-                    and not (ctrl_down() or alt_down() or win_down())):
-                send_text(chr(vk) if not shift_down() else chr(vk + 32))
-                return True
-            return False
+            return False  # 英文模式全部放行,大小写由系统的 Caps Lock 决定
         if ctrl_down() or alt_down() or win_down():
             return False  # 带修饰键的快捷键直接放行,组词不受影响(取消用 Esc)
 
@@ -1141,8 +1155,14 @@ class Engine:
         return pair[1] if shift_down() else pair[0]
 
     def on_key_up(self, vk):
-        if vk == VK_CAPITAL:  # keydown 已接管,抬起一并吞掉
-            return True
+        if vk == VK_CAPITAL:
+            if self._caps_eaten:  # keydown 已接管,抬起一并吞掉
+                self._caps_eaten = False
+                return True
+            self.caps_mode = not self.caps_mode  # 系统刚翻转了大写锁定,同步托盘 A/英
+            if self.tray:
+                self.tray.set_mode(self.cn_mode)
+            return False
         if vk in SHIFT_KEYS and self.shift_tap:
             self.shift_tap = False
             if self.buf:  # 组词中单击 Shift:原始字母上屏并取消候选,同时切回英文模式
