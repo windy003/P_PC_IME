@@ -902,13 +902,19 @@ class Dict:
                 pool = [t for k in keys for t in self.table.get(k, ())]
         if target is None:  # 简拼选词:反查该词真正的拼音键(简拼按字母模糊展开)
             letters = "".join(sylls)
+            abbr_keylist = self.abbr_keys(letters)
             ab_key = None
-            for k in self.abbr_keys(letters):
+            for k in abbr_keylist:
                 ab = self.abbr.get(k)
                 if ab and any(w == word for w, _ in ab):
-                    ab_key, pool = k, ab
+                    ab_key = k
                     break
             if ab_key is not None:
+                # 比较池要合并该简拼串所有模糊音组合键的桶,而不只是词所在的那一个键:
+                # candidates() 里 "ll" 会连 "nl"/"rl" 等模糊变体一起展示、统一按权重排序,
+                # 调权时若只跟自己所在键内比较,赢不过其它模糊键里权重更高的词,选完再打
+                # 还是排不到最前面。
+                pool = [t for k in abbr_keylist for t in self.abbr.get(k, ())]
                 for k, v in self.table.items():
                     ss = k.split(" ")
                     if (len(ss) == len(ab_key)
