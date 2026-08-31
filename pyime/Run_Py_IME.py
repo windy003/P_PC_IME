@@ -916,6 +916,15 @@ class Dict:
                             and any(w == word for w, _ in v)):
                         target = k
                         break
+        if target is None and len(sylls) == 1 and sylls[0] in self.initial_idx:
+            # 单字母选词(如打 s 出「是/说/上」):反查该字真正的拼音键。
+            # 单字母不是完整音节(如 s 本身不合法),前两条反查都命中不了,
+            # 否则调权直接被跳过——打单字母选词永远排不到前面。
+            letter = sylls[0]
+            for k, v in self.table.items():
+                if " " not in k and k[:1] == letter and any(w == word for w, _ in v):
+                    target, pool = k, list(v)
+                    break
         if target is None:
             return None
         # 比较池并入「简拼桶」:否则像 yun mu 这种全拼键下只有「韵母」一个词时,

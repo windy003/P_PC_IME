@@ -396,6 +396,20 @@ class PinyinDict(raw: String) {
                 }
             }
         }
+        if (target == null && sylls.size == 1) {
+            // 单字母选词(如打 s 出「是/说/上」):反查该字真正的拼音键。
+            // 单字母不是完整音节、也不是简拼(长度不够),前两条反查都命中不了,
+            // 否则调权直接被跳过——打单字母选词永远排不到前面。
+            val letter = sylls[0].firstOrNull()
+            if (letter != null && initialIdx.containsKey(letter)) {
+                for ((k, v) in table) {
+                    if (!k.contains(" ") && k.firstOrNull() == letter && v.any { it.word == word }) {
+                        target = k; pool = v
+                        break
+                    }
+                }
+            }
+        }
         val t = target ?: return null
         val p = pool ?: return null
         // 比较池并入「简拼桶」:与 PC 版一致。否则用全拼选词只把词提到同音词里第一,
