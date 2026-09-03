@@ -64,6 +64,8 @@ class PinyinImeService : InputMethodService() {
     private var pinyinPreview: TextView? = null
     private var candidatesScroll: HorizontalScrollView? = null
     private var candidatesContainer: LinearLayout? = null
+    private val candViewPool = ArrayList<TextView>()   // 候选 View 复用池,下标 = 候选下标,免得每次按键重建
+    private var candShown = 0                          // 已渲染进容器的候选数(其余滑到右端时按需追加)
     private var toolbarRow: LinearLayout? = null   // 常驻工具条容器(顶栏 + 展开面板)
     private var keyboardKeysGroup: LinearLayout? = null // 字母/功能键位区(工具条展开时隐藏,腾出空间)
     private var toolbarTopRow: LinearLayout? = null     // 顶部一行:展开按钮 + 前若干个按钮
@@ -305,9 +307,16 @@ class PinyinImeService : InputMethodService() {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+        candViewPool.clear()   // 视图重建:池里旧 View 挂在已废弃的容器上,不能再复用
         candidatesScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(candidatesContainer)
+            // 滑到右端时追加下一批候选(生僻字如 li 里的「唳」要往后翻才看得到)
+            setOnScrollChangeListener { v, scrollX, _, _, _ ->
+                val sv = v as HorizontalScrollView
+                val child = sv.getChildAt(0)
+                if (child != null && child.width - sv.width - scrollX < sv.width) renderMoreCands()
+            }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(CANDIDATES_HEIGHT)
             )
@@ -2335,30 +2344,57 @@ class PinyinImeService : InputMethodService() {
         pinyinPreview?.text = segs.joinToString("'")
         val container = candidatesContainer ?: return
         container.removeAllViews()
-        if (dict == null && buf.isNotEmpty()) {
-            container.addView(hintView("词库未加载:请把 pinyin_simp.dict.yaml 放到 1/IME_Yaml/D_IME_Yaml 目录并授予文件权限"))
-        } else {
-            for ((i, c) in cands.withIndex()) {
-                container.addView(candView(c.word, i))
-            }
-        }
+        candShown = 0
         val show = buf.isNotEmpty()
         // 有拼音输入:显示预览+候选;无输入:显示常驻工具条。两者总高相同,键盘不跳动。
+        // 先定可见性再渲染:renderMoreCands 里「这批没撑满可视宽度」的判断要用滚动栏的实际宽度。
         pinyinPreview?.visibility = if (show) View.VISIBLE else View.GONE
         candidatesScroll?.visibility = if (show) View.VISIBLE else View.GONE
         toolbarRow?.visibility = if (show) View.GONE else View.VISIBLE
         candidatesScroll?.scrollTo(0, 0)
+        if (dict == null && buf.isNotEmpty()) {
+            container.addView(hintView("词库未加载:请把 pinyin_simp.dict.yaml 放到 1/IME_Yaml/D_IME_Yaml 目录并授予文件权限"))
+        } else {
+            renderMoreCands()   // 只渲染第一批,其余滑到右端时按需追加
+        }
     }
 
-    private fun candView(word: String, index: Int): TextView {
-        return TextView(this).apply {
+    /**
+     * 追加渲染下一批候选。候选总数不再设上限(见 PinyinDict.MAX_CANDS),一次性全建 View 会让
+     * 每次按键都创建几百个 TextView 而卡顿,所以分批:首屏只渲染 CAND_BATCH 个,往右滑时再补。
+     */
+    private fun renderMoreCands() {
+        val container = candidatesContainer ?: return
+        val scroll = candidatesScroll ?: return
+        if (candShown >= cands.size) return
+        val end = minOf(cands.size, candShown + CAND_BATCH)
+        while (candShown < end) {
+            container.addView(bindCandView(candShown, cands[candShown].word))
+            candShown++
+        }
+        // 这批若没撑满可视宽度,用户滑不动也就触发不了下一批,等布局完成后自动补渲染
+        scroll.post {
+            if (candShown < cands.size && scroll.visibility == View.VISIBLE &&
+                scroll.width > 0 && container.width <= scroll.width
+            ) renderMoreCands()
+        }
+    }
+
+    /** 取复用池里第 index 个候选 View(没有则新建),重设文字与配色后返回。 */
+    private fun bindCandView(index: Int, word: String): TextView {
+        while (candViewPool.size <= index) {
+            val i = candViewPool.size
+            candViewPool.add(TextView(this).apply {
+                textSize = 17f
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(4), dp(12), dp(4))
+                isClickable = true
+                setOnClickListener { choose(i) }   // 池下标恒等于候选下标,点击监听建一次即可
+            })
+        }
+        return candViewPool[index].apply {
             text = if (index < 9) "${index + 1} $word" else word
-            textSize = 17f
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(4), dp(12), dp(4))
-            setTextColor(colText())
-            isClickable = true
-            setOnClickListener { choose(index) }
+            setTextColor(colText())   // 夜间模式切换后配色要跟着变
         }
     }
 
@@ -2413,6 +2449,7 @@ class PinyinImeService : InputMethodService() {
         const val TOOLBAR_ROW_HEIGHT = TOOLBAR_BTN_HEIGHT + TOOLBAR_BTN_MARGIN * 2  // 工具条单行高 = 50
         const val HEADER_HEIGHT = TOOLBAR_ROWS * TOOLBAR_ROW_HEIGHT                 // 工具条总高(最高者)= 100
         const val CANDIDATES_HEIGHT = HEADER_HEIGHT - PREVIEW_HEIGHT               // 候选栏高,使预览+候选 = HEADER_HEIGHT
+        const val CAND_BATCH = 40                    // 候选栏每批渲染多少个 View(其余滑到右端时追加)
         const val DEFAULT_ROW_HEIGHT = 46
         const val MIN_ROW_HEIGHT = 36
         const val MAX_ROW_HEIGHT = 76

@@ -450,7 +450,9 @@ class PinyinDict(raw: String) {
 
     companion object {
         // ---- 配置(与 pyime.py 顶部一致) ----
-        const val MAX_CANDS = 60
+        // 不限制候选数(与 PC 版一致):生僻字如「唳」在 li 的候选里排名靠后,截断会导致翻不到。
+        // UI 侧改成分批懒渲染(见 PinyinImeService.renderMoreCands),所以放开上限不影响按键流畅度。
+        const val MAX_CANDS = Int.MAX_VALUE
         const val MAX_PINYIN = 30
         const val MAX_FUZZY_KEYS = 24
         const val ENABLE_SHOUPIN = true
