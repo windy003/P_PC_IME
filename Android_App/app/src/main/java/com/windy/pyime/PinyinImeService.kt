@@ -1758,7 +1758,7 @@ class PinyinImeService : InputMethodService() {
 
     // ---------------------------------------------------------------- 符号选择页
     /** 可选符号全集(主面板里没有的)。新增符号往这里加即可,首次默认排在末尾。 */
-    private val symbolCatalog = listOf("=", "·", "(", ")", "#")
+    private val symbolCatalog = listOf("=", "·", "(", ")", "#", "%")
 
     /** 每行放几个符号键。 */
     private val symbolCols = 6
